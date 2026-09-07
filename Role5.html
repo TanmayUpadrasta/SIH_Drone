@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AeroMesh — 3D Model Viewer</title>
+<style>
+  :root{
+    --bg: #0c0f0d;
+    --panel: #121613;
+    --line: #26302a;
+    --text: #e7ede8;
+    --dim: #8a9690;
+    --accent: #6bd68f;
+    --warn: #d6a86b;
+    --mono: 'IBM Plex Mono', 'Consolas', monospace;
+    --sans: 'Inter', -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family:var(--sans); overflow:hidden; }
+
+  #app { display:grid; grid-template-columns: 300px 1fr; height:100vh; }
+
+  /* ---- left panel ---- */
+  #panel {
+    background:var(--panel); border-right:1px solid var(--line);
+    padding:20px; display:flex; flex-direction:column; gap:20px; overflow-y:auto;
+  }
+  .brand { font-size:15px; font-weight:600; letter-spacing:0.2px; }
+  .brand span { color:var(--accent); }
+  .sub { font-size:12px; color:var(--dim); margin-top:2px; }
+
+  .block { border-top:1px solid var(--line); padding-top:16px; }
+  .block h3 { font-size:11px; text-transform:uppercase; letter-spacing:0.6px; color:var(--dim); margin:0 0 10px; font-weight:600; }
+
+  .field { margin-bottom:10px; }
+  .field label { display:block; font-size:12px; color:var(--dim); margin-bottom:5px; }
+  .file-btn {
+    display:block; width:100%; padding:9px 10px; background:#182019; border:1px dashed var(--line);
+    border-radius:6px; color:var(--text); font-size:12.5px; cursor:pointer; text-align:left;
+  }
+  .file-btn:hover { border-color:var(--accent); }
+  .file-btn.loaded { border-style:solid; border-color:var(--accent); color:var(--accent); }
+  input[type=file]{ display:none; }
+
+  .kv { display:flex; justify-content:space-between; font-size:12.5px; padding:4px 0; font-family:var(--mono); }
+  .kv .k { color:var(--dim); }
+  .kv .v { color:var(--text); }
+
+  button.primary {
+    width:100%; padding:10px; background:var(--accent); color:#08130c; border:none; border-radius:6px;
+    font-weight:600; font-size:13px; cursor:pointer;
+  }
+  button.primary:hover { filter:brightness(1.08); }
+  button.ghost {
+    width:100%; padding:8px; background:transparent; color:var(--text); border:1px solid var(--line);
+    border-radius:6px; font-size:12.5px; cursor:pointer; margin-top:6px;
+  }
+  button.ghost:hover { border-color:var(--dim); }
+  button.ghost.active { border-color:var(--accent); color:var(--accent); }
+
+  #measure-readout {
+    font-family:var(--mono); font-size:22px; color:var(--accent); padding:10px 0 2px;
+  }
+  #measure-hint { font-size:11.5px; color:var(--dim); line-height:1.5; }
+
+  /* ---- viewport ---- */
+  #viewport { position:relative; }
+  canvas { display:block; }
+  #hud {
+    position:absolute; top:14px; right:16px; text-align:right; font-family:var(--mono);
+    font-size:11px; color:var(--dim); pointer-events:none; line-height:1.6;
+  }
+  #loading {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:var(--bg); font-family:var(--mono); color:var(--dim); font-size:13px;
+  }
+  #loading.hidden{ display:none; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="panel">
+    <div>
+      <div class="brand">AeroMesh <span>Viewer</span></div>
+      <div class="sub">Single-pass reconstruction — inspection view</div>
+    </div>
+
+    <div class="block">
+      <h3>Model input</h3>
+      <div class="field">
+        <label>Mesh (.obj / .ply) — from Role 3</label>
+        <label class="file-btn" id="meshBtnLabel" for="meshInput">Choose file…</label>
+        <input type="file" id="meshInput" accept=".obj,.ply">
+      </div>
+      <div class="field">
+        <label>Georeference transform (.json) — from Role 4</label>
+        <label class="file-btn" id="xformBtnLabel" for="xformInput">Choose file…</label>
+        <input type="file" id="xformInput" accept=".json">
+      </div>
+      <div class="field">
+        <label>Capture metadata (.json) — from Role 6</label>
+        <label class="file-btn" id="metaBtnLabel" for="metaInput">Choose file…</label>
+        <input type="file" id="metaInput" accept=".json">
+      </div>
+      <button class="primary" id="loadDemoBtn">Load sample scene</button>
+    </div>
+
+    <div class="block">
+      <h3>Display</h3>
+      <button class="ghost active" id="toggleShaded">Shaded surface</button>
+      <button class="ghost" id="toggleWire">Wireframe overlay</button>
+    </div>
+
+    <div class="block">
+      <h3>Measure</h3>
+      <div id="measure-readout">— m</div>
+      <div id="measure-hint">Click two points on the model to measure real-world distance. Scale applied: <span id="scaleTag">1.0000 m/unit</span></div>
+      <button class="ghost" id="clearMeasure">Clear points</button>
+    </div>
+
+    <div class="block" id="metaBlock">
+      <h3>Capture metadata</h3>
+      <div class="kv"><span class="k">Location</span><span class="v" id="mLocation">—</span></div>
+      <div class="kv"><span class="k">Captured</span><span class="v" id="mDate">—</span></div>
+      <div class="kv"><span class="k">Frames used</span><span class="v" id="mFrames">—</span></div>
+      <div class="kv"><span class="k">Proc. time</span><span class="v" id="mProc">—</span></div>
+    </div>
+  </div>
+
+  <div id="viewport">
+    <div id="hud">
+      <div id="hudTris">triangles: —</div>
+      <div id="hudFps">fps: —</div>
+    </div>
+    <div id="loading">Loading sample scene…</div>
+  </div>
+
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+
+// ---------- core scene setup ----------
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0c0f0d);
+scene.fog = new THREE.Fog(0x0c0f0d, 40, 140);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+camera.position.set(14, 10, 14);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+viewport.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 1, 0);
+
+// lighting: one key light + soft fill, mimics outdoor drone-capture lighting
+scene.add(new THREE.HemisphereLight(0xdfe9e0, 0x1a1f1c, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(20, 30, 10);
+scene.add(sun);
+
+const grid = new THREE.GridHelper(60, 60, 0x26302a, 0x1a221d);
+scene.add(grid);
+
+function resize() {
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+window.addEventListener('resize', resize);
+
+// ---------- model + transform state ----------
+let currentModel = null;
+let wireOverlay = null;
+let metersPerUnit = 1.0; // overwritten by transform.json from Role 4
+
+function clearModel() {
+  if (currentModel) { scene.remove(currentModel); currentModel = null; }
+  if (wireOverlay) { scene.remove(wireOverlay); wireOverlay = null; }
+}
+
+function frameCameraOn(object) {
+  const box = new THREE.Box3().setFromObject(object);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z) * 0.75 || 5;
+  controls.target.copy(center);
+  camera.position.copy(center).add(new THREE.Vector3(radius, radius * 0.7, radius));
+  camera.near = radius / 100; camera.far = radius * 50;
+  camera.updateProjectionMatrix();
+}
+
+function addModel(object) {
+  clearModel();
+  object.traverse(c => {
+    if (c.isMesh) {
+      if (!c.material || !c.material.map) {
+        c.material = new THREE.MeshStandardMaterial({ color: 0x9fb8a6, roughness: 0.85, metalness: 0.05 });
+      }
+      c.castShadow = false; c.receiveShadow = false;
+    }
+  });
+  currentModel = object;
+  scene.add(currentModel);
+  frameCameraOn(currentModel);
+  countTriangles(currentModel);
+}
+
+function countTriangles(object) {
+  let tris = 0;
+  object.traverse(c => {
+    if (c.isMesh && c.geometry) {
+      const g = c.geometry;
+      tris += g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+    }
+  });
+  document.getElementById('hudTris').textContent = `triangles: ${Math.round(tris).toLocaleString()}`;
+}
+
+// ---------- demo scene (stand-in until a real Role 3 export exists) ----------
+function loadDemoScene() {
+  clearModel();
+  const group = new THREE.Group();
+  const baseMat = new THREE.MeshStandardMaterial({ color: 0x9fb8a6, roughness: 0.9 });
+  const roofMat = new THREE.MeshStandardMaterial({ color: 0x6b8f78, roughness: 0.8 });
+
+  const building = new THREE.Mesh(new THREE.BoxGeometry(6, 4, 5), baseMat);
+  building.position.set(-4, 2, 0);
+  group.add(building);
+
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(4.3, 2, 4), roofMat);
+  roof.position.set(-4, 5, 0);
+  roof.rotation.y = Math.PI / 4;
+  group.add(roof);
+
+  // --- tree, standing beside the house ---
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4a35, roughness: 0.95 });
+  const leafMat = new THREE.MeshStandardMaterial({ color: 0x4f7a4a, roughness: 0.85 });
+
+  const treeX = -8, treeZ = 1.5; // just to the left of the house (-4, 2, 0)
+
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, 3, 8), trunkMat);
+  trunk.position.set(treeX, 1.5, treeZ); // half of trunk height, so it sits ON the ground
+  group.add(trunk);
+
+  // three overlapping spheres read as "leafy" much better than one perfect cone
+  const foliagePositions = [
+    { y: 3.6, r: 1.5 },
+    { y: 4.5, r: 1.15 },
+    { y: 5.2, r: 0.8 },
+  ];
+  foliagePositions.forEach(({ y, r }) => {
+    const leaf = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), leafMat);
+    leaf.position.set(treeX, y, treeZ);
+    group.add(leaf);
+  });
+
+  const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.8, 7, 12), baseMat);
+  tower.position.set(4, 3.5, -2);
+  group.add(tower);
+
+  const bridgeDeck = new THREE.Mesh(new THREE.BoxGeometry(10, 0.4, 1.6), roofMat);
+  bridgeDeck.position.set(1, 1.2, 4);
+  group.add(bridgeDeck);
+
+  addModel(group);
+  document.getElementById('loading').classList.add('hidden');
+}
+
+// ---------- transform.json (Role 4 handoff) ----------
+function applyTransform(t) {
+  if (!currentModel) return;
+  metersPerUnit = t.scale ?? 1.0;
+  document.getElementById('scaleTag').textContent = `${metersPerUnit.toFixed(4)} m/unit`;
+  if (t.rotation) currentModel.rotation.set(
+    THREE.MathUtils.degToRad(t.rotation[0] || 0),
+    THREE.MathUtils.degToRad(t.rotation[1] || 0),
+    THREE.MathUtils.degToRad(t.rotation[2] || 0)
+  );
+  if (t.translation) currentModel.position.set(...t.translation);
+}
+
+// ---------- metadata.json (Role 6 handoff) ----------
+function applyMetadata(m) {
+  document.getElementById('mLocation').textContent = m.location ?? '—';
+  document.getElementById('mDate').textContent = m.capture_date ?? '—';
+  document.getElementById('mFrames').textContent = m.num_frames_used ?? '—';
+  document.getElementById('mProc').textContent = m.processing_time_sec ? `${m.processing_time_sec}s` : '—';
+}
+
+// ---------- file input wiring ----------
+function wireFileInput(inputId, labelId, onLoad) {
+  const input = document.getElementById(inputId);
+  const label = document.getElementById(labelId);
+  input.addEventListener('change', () => {
+    const file = input.files[0];
+    if (!file) return;
+    label.textContent = file.name;
+    label.classList.add('loaded');
+    onLoad(file);
+  });
+}
+
+wireFileInput('meshInput', 'meshBtnLabel', (file) => {
+  const url = URL.createObjectURL(file);
+  const ext = file.name.split('.').pop().toLowerCase();
+  document.getElementById('loading').classList.remove('hidden');
+  document.getElementById('loading').textContent = 'Parsing mesh…';
+  if (ext === 'obj') {
+    new OBJLoader().load(url, (obj) => { addModel(obj); document.getElementById('loading').classList.add('hidden'); });
+  } else if (ext === 'ply') {
+    new PLYLoader().load(url, (geometry) => {
+      geometry.computeVertexNormals();
+      const mat = new THREE.MeshStandardMaterial({ color: 0x9fb8a6, roughness: 0.85, vertexColors: geometry.hasAttribute('color') });
+      const mesh = new THREE.Mesh(geometry, mat);
+      const group = new THREE.Group(); group.add(mesh);
+      addModel(group);
+      document.getElementById('loading').classList.add('hidden');
+    });
+  }
+});
+
+wireFileInput('xformInput', 'xformBtnLabel', (file) => {
+  file.text().then(txt => applyTransform(JSON.parse(txt)));
+});
+
+wireFileInput('metaInput', 'metaBtnLabel', (file) => {
+  file.text().then(txt => applyMetadata(JSON.parse(txt)));
+});
+
+document.getElementById('loadDemoBtn').addEventListener('click', () => {
+  document.getElementById('loading').classList.remove('hidden');
+  document.getElementById('loading').textContent = 'Loading sample scene…';
+  setTimeout(loadDemoScene, 150);
+  metersPerUnit = 1.0;
+  document.getElementById('scaleTag').textContent = '1.0000 m/unit (demo — unscaled)';
+  applyMetadata({ location: 'Sample site, demo mode', capture_date: '—', num_frames_used: '—', processing_time_sec: null });
+});
+
+// ---------- display toggles ----------
+document.getElementById('toggleShaded').addEventListener('click', (e) => {
+  setShaded(true); setActive(e.target, ['toggleShaded']);
+});
+document.getElementById('toggleWire').addEventListener('click', (e) => {
+  setShaded(false); setActive(e.target, ['toggleWire']);
+});
+function setActive(target, ids) {
+  ['toggleShaded', 'toggleWire'].forEach(id => document.getElementById(id).classList.remove('active'));
+  target.classList.add('active');
+}
+function setShaded(shaded) {
+  if (!currentModel) return;
+  currentModel.traverse(c => { if (c.isMesh) c.material.wireframe = !shaded; });
+}
+
+// ---------- click-to-measure via raycasting ----------
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+let measurePoints = [];
+let measureMarkers = [];
+let measureLine = null;
+
+function makeMarker(pos) {
+  const geo = new THREE.SphereGeometry(0.06, 12, 12);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x6bd68f });
+  const m = new THREE.Mesh(geo, mat);
+  m.position.copy(pos);
+  scene.add(m);
+  return m;
+}
+
+function clearMeasurement() {
+  measurePoints = [];
+  measureMarkers.forEach(m => scene.remove(m));
+  measureMarkers = [];
+  if (measureLine) { scene.remove(measureLine); measureLine = null; }
+  document.getElementById('measure-readout').textContent = '— m';
+}
+document.getElementById('clearMeasure').addEventListener('click', clearMeasurement);
+
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  if (!currentModel) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNDC.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNDC.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointerNDC, camera);
+  const hits = raycaster.intersectObject(currentModel, true);
+  if (hits.length === 0) return;
+
+  const point = hits[0].point.clone();
+  if (measurePoints.length === 2) clearMeasurement();
+
+  measurePoints.push(point);
+  measureMarkers.push(makeMarker(point));
+
+  if (measurePoints.length === 2) {
+    const geo = new THREE.BufferGeometry().setFromPoints(measurePoints);
+    const mat = new THREE.LineBasicMaterial({ color: 0x6bd68f });
+    measureLine = new THREE.Line(geo, mat);
+    scene.add(measureLine);
+
+    const sceneDist = measurePoints[0].distanceTo(measurePoints[1]);
+    const realDist = sceneDist * metersPerUnit;
+    document.getElementById('measure-readout').textContent = `${realDist.toFixed(3)} m`;
+  }
+});
+
+// ---------- render loop ----------
+let lastT = performance.now(), frames = 0, fpsAcc = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+
+  frames++;
+  const now = performance.now();
+  if (now - lastT >= 500) {
+    const fps = (frames * 1000) / (now - lastT);
+    document.getElementById('hudFps').textContent = `fps: ${fps.toFixed(0)}`;
+    frames = 0; lastT = now;
+  }
+}
+
+resize();
+loadDemoScene();
+animate();
+</script>
+</body>
+</html>
