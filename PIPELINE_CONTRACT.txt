@@ -1,0 +1,195 @@
+================================================================
+PIPELINE CONTRACT — Single-Pass Drone Video to 3D Model
+================================================================
+Root folder per run: /data/{run_id}/
+
+----------------------------------------------------------------
+STAGE 1 — Preprocessing (Role 1)
+----------------------------------------------------------------
+Input:
+  /data/{run_id}/raw/video.mp4
+  /data/{run_id}/raw/camera_intrinsics.json
+    (focal length, sensor size / resolution, camera model —
+     single fixed camera assumed for the whole flight)
+
+Output:
+  /data/{run_id}/keyframes/frame_0001.jpg, frame_0002.jpg, ...
+    - Sequential 4-digit zero-padded naming, in capture order
+    - JPEG, no downscaling below 1080p
+
+Assumptions:
+  - Video is a single continuous take, no cuts
+  - Camera intrinsics are constant across all frames
+
+On failure:
+  Log which frames were rejected (blur/etc.) to
+  /data/{run_id}/keyframes/rejected_log.txt
+
+
+----------------------------------------------------------------
+STAGE 2 — SfM / Sparse Reconstruction (Role 2)
+----------------------------------------------------------------
+Input:
+  /data/{run_id}/keyframes/*.jpg
+  /data/{run_id}/raw/camera_intrinsics.json
+
+Output:
+  /data/{run_id}/sparse/cameras.txt, images.txt, points3D.txt
+    (COLMAP's standard TEXT output format — not binary,
+     so Role 6 can inspect it directly while debugging)
+
+Assumptions:
+  - All keyframes belong to one continuous scene
+  - Single camera model applies to all images
+
+On failure:
+  Log which images failed registration to
+  /data/{run_id}/sparse/failed_images.txt
+
+
+----------------------------------------------------------------
+STAGE 3 — Dense Reconstruction & Mesh (Role 3)
+----------------------------------------------------------------
+Input:
+  /data/{run_id}/sparse/  (COLMAP sparse output)
+
+Output:
+  /data/{run_id}/mesh/model.obj + model.mtl + texture.jpg
+  (This is the ONLY valid output format. No point-cloud fallback.)
+
+Assumptions:
+  - Sparse reconstruction succeeded for >80% of keyframes
+
+On failure:
+  HARD FAIL. Pipeline halts here — no fallback output is produced.
+  Write failure reason to /data/{run_id}/mesh/failure_log.txt
+  Set manifest.json -> "stage_3_complete": false
+  Role 6 must investigate (check keyframe quality, re-run Stage 2
+  with different parameters, or re-select test footage) before
+  the pipeline can continue.
+
+
+----------------------------------------------------------------
+STAGE 4 — Georeferencing (Role 4)
+----------------------------------------------------------------
+Input:
+  /data/{run_id}/mesh/model.obj (+ .mtl + texture)
+  /data/{run_id}/raw/flight_metadata.json (GPS per frame)
+
+Output:
+  /data/{run_id}/georeferenced/model_geo.obj (+ .mtl + texture)
+  /data/{run_id}/georeferenced/transform.json
+    (documents scale factor, rotation, translation applied)
+
+Assumptions:
+  - At least 5 keyframes have valid GPS tags
+  - Stage 3 completed successfully
+    (manifest.json "stage_3_complete": true) — this stage does
+    not run otherwise
+
+On failure:
+  Output ungeoreferenced model unchanged + log warning to
+  /data/{run_id}/georeferenced/warning.txt
+
+
+----------------------------------------------------------------
+STAGE 5 — Viewer (Role 5)
+----------------------------------------------------------------
+Input:
+  /data/{run_id}/georeferenced/model_geo.obj (+ .mtl + texture)
+
+Output:
+  N/A (renders in browser)
+
+Assumptions:
+  - Uses OBJLoader + MTLLoader only (no PLYLoader needed)
+
+On failure:
+  Display a clear "reconstruction failed for this run — check
+  pipeline logs" message if expected files are missing.
+
+
+================================================================
+METADATA FORMATS (owned by Role 6)
+================================================================
+
+flight_metadata.json:
+{
+  "frame_0001.jpg": {"lat": 22.3072, "lon": 73.1812, "alt": 45.2},
+  "frame_0002.jpg": {"lat": 22.3073, "lon": 73.1813, "alt": 45.3},
+  ...
+}
+
+camera_intrinsics.json:
+{
+  "focal_length_mm": 4.5,
+  "sensor_width_mm": 6.3,
+  "sensor_height_mm": 4.7,
+  "image_width_px": 1920,
+  "image_height_px": 1080,
+  "camera_model": "PINHOLE"
+}
+
+manifest.json (updated after each stage completes, at
+/data/{run_id}/manifest.json):
+{
+  "run_id": "run_001",
+  "stage_1_complete": true,
+  "stage_2_complete": true,
+  "stage_3_complete": true,
+  "stage_4_complete": false,
+  "stage_5_complete": false,
+  "last_updated": "2026-08-28T14:30:00Z"
+}
+  -> Role 6 checks this single file to see pipeline status
+     instead of poking through five folders during integration
+     tests.
+
+
+================================================================
+INTEGRATION TEST CHECKPOINTS (owned by Role 6)
+================================================================
+Compressed for a 1-WEEK build. Given the tighter timeline, Stage 3
+now hard-fails instead of degrading — so finding out EARLY whether
+your test footage reconstructs cleanly matters more than ever.
+Front-load testing; do not leave it for the back half of the week.
+
+Day 1 (today):
+  - Pipeline contract signed off by all of Roles 1-4
+  - Test footage + GPS metadata sourced and in /data/{run_id}/raw/
+  - Everyone has their tool installed and running on a sample
+    dataset (not your own footage yet)
+
+Day 2:
+  - Stage 1 -> Stage 2 handoff tested on REAL footage
+  - If Stage 2 struggles, diagnose now: bad keyframe selection
+    (Role 1) vs. genuinely hard footage (re-shoot or pick new
+    test data)
+
+Day 3:
+  - Stage 2 -> Stage 3 tested on real footage
+  - Deliberately check whether Stage 3 hard-fails on your actual
+    test data. If it does, this is your highest-priority fix —
+    you have no fallback output to fall back on.
+
+Day 4:
+  - Stage 3 -> Stage 4 chain produces a georeferenced .obj
+  - Cross-check georeferencing against a known real-world
+    distance in the scene (start your accuracy evaluation now,
+    not later)
+
+Day 5:
+  - Full pipeline (Stage 1 through 5) run end-to-end, unattended,
+    on your real test footage
+  - Viewer displays the final georeferenced model correctly
+
+Day 6:
+  - Polish: mesh quality, viewer UI, accuracy numbers finalized
+  - Fix any integration breakage found during Day 5's full run
+  - Pitch deck drafted
+
+Day 7:
+  - Demo rehearsal (at least twice, full run-through)
+  - Backup: pre-recorded screen capture of a successful pipeline
+    run, in case live demo hardware/connectivity fails
+  - Final pitch review
